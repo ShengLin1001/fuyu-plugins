@@ -10,7 +10,8 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "build": "node scripts/build-index.mjs",
     "sign": "node scripts/sign.mjs",
-    "check": "node scripts/check-submission.mjs"
+    "check": "node scripts/check-submission.mjs",
+    "tools": "node scripts/v3/fetch-tools.mjs"
   },
   "dependencies": {
     "fuyu-plugin": "0.7.0"

@@ -19,19 +19,21 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   discussions: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    environment: ci-push
     steps:
       # main as it is when the run starts, not when it was queued: a run waiting
       # behind another would otherwise count from an old stars.json and fail to push.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: main
+          ssh-key: ${{ secrets.CI_PUSH_DEPLOY_KEY }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22

@@ -2,7 +2,9 @@
 # whenever main changes. Building downloads and unpacks third-party packages, so
 # it runs without the signing key; the signing job gets only the built
 # index.json, needs no dependencies and is the only one in the "release"
-# environment, whose secret holds the key and which only main may use.
+# environment, whose secret holds the key and which only main may use. The push
+# job is the only one in the "ci-push" environment, whose deploy key may push to
+# main past its ruleset; it gets only the signed files.
 name: Update index
 
 on:
@@ -59,10 +61,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: release
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: index
@@ -77,8 +79,34 @@ jobs:
           cp built/index.json index.json
           rm -rf built
           node scripts/sign.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed
+          path: |
+            index.json
+            index.json.sig
+            revoked.json
+            revoked.json.sig
+          retention-days: 1
+
+  push:
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    environment: ci-push
+    steps:
+      # The commit the index was built from, so a push fails rather than
+      # overwrite a revoked.json that main changed meanwhile; that change
+      # starts another run.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ssh-key: ${{ secrets.CI_PUSH_DEPLOY_KEY }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed
+          path: ${{ runner.temp }}/signed
       - name: Commit
         run: |
+          cp "$RUNNER_TEMP"/signed/* .
           git add index.json index.json.sig revoked.json revoked.json.sig
           if git diff --cached --quiet; then
             echo "The index did not change."

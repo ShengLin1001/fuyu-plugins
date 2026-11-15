@@ -1,5 +1,21 @@
 # Checks pull requests. Runs on `pull_request`, so code from a fork gets a
 # read-only token and no secrets.
+#
+# "check" covers the v2 market and themes and runs the tests. The v3 jobs:
+#   v3-plan    checks the changed plugins/v3/<scope>/<name>.json files, author
+#              signatures (official plugins: the commit is on TixXin/fuyu's
+#              protected main), who may change what, revoked.v3.json and the
+#              trust root, and lists the versions to build
+#   v3-build   one job per version, treated as running hostile code: no secrets,
+#              read-only token, the author's commit fetched by id, dependencies
+#              from the npm registry without install scripts, built with the
+#              market's settings and the pinned TixXin/fuyu tools, then reviewed
+#              against the last listed version
+#   v3-report  puts it together, rehearses the index the merge would produce
+#              (signed with a throwaway key, opened as the island opens it),
+#              comments on the pull request (the "Comment the v3 report"
+#              workflow does it for forks) and fails on any problem or red review
+# The main ruleset requires "check" and "v3-report".
 name: Check submission
 
 on:
@@ -15,11 +31,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs --install
       - run: npm test
       - name: Check the submission
         env:
@@ -28,3 +47,117 @@ jobs:
           AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-submission.mjs
+
+  v3-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ids: ${{ steps.plan.outputs.ids }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs
+      - name: Plan
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/v3/plan.mjs --mode pr --out "$RUNNER_TEMP/v3-plan"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+          retention-days: 7
+
+  v3-build:
+    needs: v3-plan
+    if: needs.v3-plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        id: ${{ fromJSON(needs.v3-plan.outputs.ids) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs --install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+      - name: Build and review
+        env:
+          ID: ${{ matrix.id }}
+        run: node scripts/v3/build.mjs --plan "$RUNNER_TEMP/v3-plan/plan.json" --id "$ID" --out "$RUNNER_TEMP/v3-builds" --work "$RUNNER_TEMP/v3-work"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: v3-build-${{ matrix.id }}
+          path: ${{ runner.temp }}/v3-builds
+          retention-days: 7
+
+  v3-report:
+    needs: [v3-plan, v3-build]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.v3-plan.outputs.count != '0'
+        continue-on-error: true
+        with:
+          pattern: v3-build-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/v3-builds
+      - name: Report
+        id: report
+        continue-on-error: true
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/v3/report.mjs --plan "$RUNNER_TEMP/v3-plan" --builds "$RUNNER_TEMP/v3-builds" --out "$RUNNER_TEMP/v3-report" --pr "$PR" --head-sha "$HEAD_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v3-report
+          path: ${{ runner.temp }}/v3-report
+          retention-days: 7
+      - name: Comment on the pull request
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/v3/comment.mjs --body "$RUNNER_TEMP/v3-report/comment.md" --pr-file "$RUNNER_TEMP/v3-report/pr.json" --head-sha "$HEAD_SHA"
+      - name: Result
+        if: steps.report.outcome != 'success'
+        run: |
+          echo "The v3 submission needs changes; see the report above."
+          exit 1
