@@ -1,0 +1,19 @@
+{
+  "name": "@tixxin/market-ci-demo",
+  "version": "1.1.0",
+  "type": "module",
+  "description": "A plugin that only exists to test the v3 market CI",
+  "license": "MIT",
+  "repository": "github:TixXin/fuyu-plugins",
+  "engines": { "fuyu": ">=0.4.0" },
+  "fuyu": {
+    "manifest": 1,
+    "displayName": { "zh-CN": "市场 CI 演示", "en": "Market CI demo" },
+    "description": { "zh-CN": "只用来测试第 3 版市场的 CI", "en": "Only for testing the v3 market CI" },
+    "icon": "assets/icon.svg",
+    "categories": ["developer"],
+    "host": "dist/host.js",
+    "provides": ["demo-weather"],
+    "network": ["api.open-meteo.com"]
+  }
+}

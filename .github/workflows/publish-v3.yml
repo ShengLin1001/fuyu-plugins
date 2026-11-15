@@ -1,0 +1,280 @@
+# Lists v3 plugin versions once a maintainer has approved and merged them, and
+# re-signs index.v3.json every day (the island treats it as expired after 7 days).
+#
+#   plan     which submitted versions index.v3.json lacks; signatures and official
+#            commits are checked again; when each version reached main is its review time
+#   build    no secrets, read-only token: each version is built and reviewed from its
+#            commit like the pull request check did; a build error or a red review
+#            keeps it out
+#   release  may write releases, runs no plugin code: checks the build's files against
+#            their hashes, publishes one release per version (.fuyu, icon, screenshots),
+#            checks the public addresses and assembles the unsigned index
+#   sign     the "release" environment's FUYU_INDEX_V3_SIGNING_KEY; installs nothing and
+#            loads only @fuyu/plugin-market, gets only the assembled index.v3.json
+#   push     the "ci-push" environment's deploy key, the one thing that may push to main
+#            past its ruleset
+#
+# Run on any other branch (workflow_dispatch with that ref) it is a rehearsal: the
+# releases are pre-releases tagged "rehearsal-<run id>.…" and deleted at the end,
+# the index is signed with a throwaway key, and nothing is pushed.
+name: Publish v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plugins/v3/**"
+      - "revoked.v3.json"
+      - "revoked.v3.json.sig"
+      - "keys/trusted.v3.json"
+      - "market/v3/**"
+      - "scripts/v3/**"
+      - ".github/workflows/publish-v3.yml"
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-v3-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ids: ${{ steps.plan.outputs.ids }}
+      count: ${{ steps.plan.outputs.count }}
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      # main as it is when the run starts: a run that waited behind another
+      # must see the index.v3.json that one pushed. Every later job checks out
+      # this same commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.ref == 'refs/heads/main' && 'main' || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs
+      - name: Plan
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/v3/plan.mjs --mode publish --out "$RUNNER_TEMP/v3-plan"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+          retention-days: 7
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        id: ${{ fromJSON(needs.plan.outputs.ids) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs --install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+      - name: Build and review
+        env:
+          ID: ${{ matrix.id }}
+        run: node scripts/v3/build.mjs --plan "$RUNNER_TEMP/v3-plan/plan.json" --id "$ID" --out "$RUNNER_TEMP/v3-builds" --work "$RUNNER_TEMP/v3-work"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: v3-build-${{ matrix.id }}
+          path: ${{ runner.temp }}/v3-builds
+          retention-days: 7
+
+  release:
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch the market tools
+        run: node scripts/v3/fetch-tools.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-plan
+          path: ${{ runner.temp }}/v3-plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.plan.outputs.count != '0'
+        continue-on-error: true
+        with:
+          pattern: v3-build-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/v3-builds
+      - name: Publish the releases and assemble the index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ needs.plan.outputs.sha }}
+          REHEARSAL: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/v3-builds"
+          node scripts/v3/release.mjs --plan "$RUNNER_TEMP/v3-plan" --builds "$RUNNER_TEMP/v3-builds" --out "$RUNNER_TEMP/v3-index" --target "$TARGET" $([ "$REHEARSAL" = "true" ] && echo --rehearsal)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: v3-index
+          path: ${{ runner.temp }}/v3-index
+          retention-days: 7
+
+  sign:
+    needs: [plan, release]
+    if: always() && needs.release.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch @fuyu/plugin-market
+        run: node scripts/v3/fetch-tools.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-index
+          path: ${{ runner.temp }}/v3-index
+      - name: Sign
+        env:
+          FUYU_INDEX_V3_SIGNING_KEY: ${{ secrets.FUYU_INDEX_V3_SIGNING_KEY }}
+        run: node scripts/v3/sign-index.mjs --dir "$RUNNER_TEMP/v3-index"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v3-signed
+          path: |
+            ${{ runner.temp }}/v3-index/index.v3.json
+            ${{ runner.temp }}/v3-index/index.v3.json.sig
+          retention-days: 7
+
+  rehearse-sign:
+    needs: [plan, release]
+    if: always() && needs.release.result == 'success' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Fetch @fuyu/plugin-market
+        run: node scripts/v3/fetch-tools.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-index
+          path: ${{ runner.temp }}/v3-index
+      - name: Sign with a throwaway key
+        run: node scripts/v3/sign-index.mjs --dir "$RUNNER_TEMP/v3-index" --ephemeral
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v3-signed
+          path: |
+            ${{ runner.temp }}/v3-index/index.v3.json
+            ${{ runner.temp }}/v3-index/index.v3.json.sig
+          retention-days: 7
+
+  push:
+    needs: sign
+    if: always() && needs.sign.result == 'success'
+    runs-on: ubuntu-latest
+    environment: ci-push
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          ssh-key: ${{ secrets.CI_PUSH_DEPLOY_KEY }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v3-signed
+          path: ${{ runner.temp }}/v3-signed
+      - name: Commit
+        run: |
+          cp "$RUNNER_TEMP/v3-signed/index.v3.json" "$RUNNER_TEMP/v3-signed/index.v3.json.sig" .
+          git add index.v3.json index.v3.json.sig
+          if git diff --cached --quiet; then
+            echo "The v3 index did not change."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(index): update the v3 plugin index"
+          git pull --rebase --quiet
+          git push
+
+  cleanup:
+    needs: [release, rehearse-sign]
+    if: always() && github.ref != 'refs/heads/main' && needs.release.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete the rehearsal releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIX: rehearsal-${{ github.run_id }}.
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              case "$tag" in "$PREFIX"*) gh release delete "$tag" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" ;; esac
+            done
+
+  result:
+    needs: [plan, build, release, sign, rehearse-sign, push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: v3-index
+          path: ${{ runner.temp }}/v3-index
+      - name: Report failures
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.RESULTS);
+            const failed = Object.entries(needs).filter(([, job]) => job.result === "failure").map(([name]) => name);
+            let report = {};
+            try { report = require(process.env.RUNNER_TEMP + "/v3-index/release.json"); } catch {}
+            const problems = [...(report.failed ?? []), ...(report.planErrors ?? [])];
+            for (const line of problems) console.log("::error::" + line);
+            if (failed.length) console.log("::error::Failed jobs: " + failed.join(", "));
+            if (failed.length || problems.length) process.exit(1);
+          '

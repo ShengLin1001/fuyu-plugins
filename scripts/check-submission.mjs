@@ -24,6 +24,8 @@ import { revokedErrors } from "./sign.mjs";
 
 const MAINTAINERS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const SUBMISSION_FILE = /^plugins\/[^/]+\.json$/;
+/** v3 submissions (plugins/v3/<scope>/<name>.json) are checked by scripts/v3/plan.mjs. */
+const V3_SUBMISSION = /^plugins\/v3\//;
 
 function git(args) {
   const result = spawnSync("git", args, { encoding: "utf8" });
@@ -70,7 +72,7 @@ export async function checkPullRequest(root, { base, author, association }) {
   const changes = changedFiles(base);
 
   for (const { status, file } of changes) {
-    if (maintainer) continue;
+    if (maintainer || V3_SUBMISSION.test(file)) continue;
     if (THEME_FILE.test(file)) {
       if (status === "D") errors.push(`${file}: ask a maintainer to remove a theme (open an issue).`);
       continue;

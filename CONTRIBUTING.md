@@ -103,6 +103,41 @@ PR 会自动检查：
 
 发现插件有问题，请用 issue 模板「报告插件问题」。维护者可以把版本写进 `revoked.json`：已安装的岛屿会在下次刷新市场时停用（`disable`）或卸载（`uninstall`）它。
 
+## 第 3 版插件（`.fuyu`）
+
+第 3 版插件名字是 `@<作用域>/<名字>`，包是 `.fuyu`。**不用发 Release**：你给出提交号，市场从源码构建、审核，再发到本仓库的 Releases。开发说明见 [浮屿插件文档](https://github.com/TixXin/fuyu/tree/main/docs/plugins)。
+
+> `fuyu-plugin` 2.0 还没发到 npm，下面的 `npx fuyu-plugin` 在那之前换成 `node <TixXin/fuyu 的检出>/packages/plugin-cli/bin/fuyu-plugin.mjs`；在本仓库里 `npm run tools -- --install` 会把市场用的那个版本检出到 `.tools/fuyu/`。
+
+1. 只做一次：`npx fuyu-plugin keygen`，记下它打印的公钥 `{ "keyId", "publicKey" }`。私钥留在你自己的电脑上。
+2. 在你的仓库提交并推送要发布的版本：
+   - `package.json` 的 `name`、`version` 是这个版本，`repository` 指向这个仓库；
+   - 有依赖时必须提交 `package-lock.json`（`lockfileVersion` 2 或 3），依赖只能来自 `registry.npmjs.org` 并带 `sha512` 校验，不能是 git、本地路径或别的 lockfile。市场用 `npm ci --ignore-scripts` 安装，不跑安装脚本，你的 `.npmrc` 不生效；
+   - 本地可以先 `npx fuyu-plugin check --market` 和 `npx fuyu-plugin review <上一版的提交> <这次的提交>`，看到的就是 PR 上的报告。
+3. `npx fuyu-plugin sign --commit <提交号>`，把它打印的 `version`、`repository`、`commit`、`authorSignature` 四项作为一行记录；`name` 和 `publicKey` 不用抄，公钥只在第一次写进 `authorKeys`。
+4. 开 PR，新增或修改**一个文件** `plugins/v3/<作用域>/<名字>.json`：
+
+```json
+{
+  "name": "@someone/weather",
+  "path": "plugins/weather",
+  "authorKeys": [{ "keyId": "…", "publicKey": "…" }],
+  "versions": [
+    { "version": "1.0.0", "repository": "https://github.com/someone/fuyu-weather", "commit": "<40 位提交号>", "authorSignature": { "keyId": "…", "signature": "…" } }
+  ]
+}
+```
+
+   - 作用域是仓库所有者（GitHub 账号或组织）的小写，`@someone/weather` 放在 `plugins/v3/someone/weather.json`；你必须拥有这个仓库，或是那个组织的公开成员。`@fuyu/*` 留给官方插件。
+   - `path` 是插件在仓库里的文件夹，插件在仓库根目录时不写。
+   - 发新版本：在 `versions` 末尾加一行。已经上架的行不能改也不能删；作者密钥只能加不能删（删要找维护者）。
+   - 换作者密钥时，新密钥最好带旧密钥签的 `endorsedBy` 证明；没有证明的新密钥会在报告里标出来，岛屿会把它当成换了作者，要用户确认两次。
+5. PR 检查在没有任何密钥、只读权限的任务里，按提交号取你的源码，用固定版本的工具和市场的构建设置构建，再和上一个上架的版本对比，把审核报告贴在 PR 上：
+   - 🟢 绿：和上一版比没有值得注意的变化，维护者看一眼就能批准；
+   - 🟡 黄：多了权限、网络地址、子进程这类变化，报告逐条列出，维护者要看过源码再批准；
+   - 🔴 红：不会上架。改好后发新提交、新版本号再提交。
+6. 维护者批准并合入后，市场重新构建这个版本，发到本仓库的 Releases（标签 `v3.<作用域>.<名字>@<版本>`，附件是 `.fuyu`、图标和截图），几分钟后签名的 `index.v3.json` 更新。岛屿在上架 3 天后才自动更新到它（冷静期）；维护者标了紧急的版本不等。
+
 ---
 
 ## English summary
@@ -116,6 +151,8 @@ PR 会自动检查：
    The release asset must hold the same files `fuyu-plugin pack` makes from your repository at the release tag (in `path`); a release with uncommitted or changed files fails the check, and an update like that waits for a maintainer. If the plugin needs a build step whose output is not committed (the TypeScript template), add `"buildStep": true` to skip the comparison.
    Optional "verified" mark: a GitHub organization with a verified domain gets it automatically; otherwise list `"domain": "example.com"` and serve `https://example.com/.well-known/focusd-publisher.json` with `{ "github": "<publisher>" }`.
 5. New versions: just publish a new release. The index is rebuilt on a schedule that GitHub runs every few hours rather than every hour (sometimes over 10), and islands check the market every 6 hours, so expect about half a day. Updates that ask for new permissions, add a webview page, change the runtime or do not match the source at their tag wait for a maintainer, who approves them with `"approved": "<version>"`.
+
+v3 plugins (`@scope/name`, `.fuyu` packages) need no release of your own: run `npx fuyu-plugin keygen` once, push the version to your repository (dependencies only from registry.npmjs.org, locked by `package-lock.json`; the market runs `npm ci --ignore-scripts`), run `npx fuyu-plugin sign --commit <sha>`, and open a pull request that adds its `version`, `repository`, `commit` and `authorSignature` as one line of `versions` in `plugins/v3/<scope>/<name>.json` (scope = the lowercase owner of the repository, which you must own). The check builds that commit with pinned tools and no secrets, compares it with the last listed version and posts a green, yellow or red report; red is never listed. Once a maintainer approves and merges, the market rebuilds it, publishes it to this repository's releases and signs `index.v3.json`; islands update to it by themselves 3 days later.
 
 ## 提交主题 / Submit a theme
 
