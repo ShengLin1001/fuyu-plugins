@@ -1,4 +1,9 @@
 {
-  "index": [],
+  "index": [
+    {
+      "keyId": "d5a27e09caa2594b",
+      "publicKey": "eDA1G3SVRyRrRYn6MrI7D3MPSANyngEApnk0U1v9tfE="
+    }
+  ],
   "revocation": []
 }
